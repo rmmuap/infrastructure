@@ -1,0 +1,339 @@
+---
+name: "infrastructure"
+
+on: #  yamllint disable-line rule:truthy
+  workflow_dispatch:
+  push:
+    paths:
+      - "**.tf"
+      - "cloud-init/*"
+    branches:
+      - "main"
+
+permissions:
+  id-token: write
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    name: Terraform Init
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.terraform.outputs.action }}
+    steps:
+      - id: terraform
+        name: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          env
+          if [[ -n "${{ vars.DEPLOYED }}" ]]
+          then
+            if [[ "${{ vars.DEPLOYED }}" == "true" ]]
+            then
+              echo 'action=apply' >> "${GITHUB_OUTPUT}"
+            else
+              echo 'action=destroy' >> "${GITHUB_OUTPUT}"
+            fi
+          else
+            echo 'action=skip' >> "${GITHUB_OUTPUT}"
+          fi
+
+  plan:
+    needs: [terraform]
+    if: needs.terraform.outputs.action == 'apply'
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    env:
+      ARM_SKIP_PROVIDER_REGISTRATION: true
+    outputs:
+      tfplanExitCode: ${{ steps.tf-plan.outputs.exitcode }}
+
+    steps:
+      - name: Github repository checkout
+        uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871
+
+      - name: Microsoft Azure Authentication
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Hashicorp Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_wrapper: false
+
+      - name: terraform init
+        id: init
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          TF_IN_AUTOMATION: true
+          TF_CLI_ARGS_init: -backend-config="storage_account_name=${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}" -backend-config="container_name=${{ secrets.TFSTATE_CONTAINER_NAME }}" -backend-config="resource_group_name=${{ secrets.AZURE_TFSTATE_RESOURCE_GROUP_NAME }}" -backend-config="key=${{ github.ref_name }}" -input=false
+        run: terraform init
+
+      - name: terraform plan
+        id: tf-plan
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          TF_VAR_ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          TF_VAR_PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          TF_VAR_LOCATION: ${{ vars.LOCATION }}
+          TF_VAR_GITHUB_TOKEN: ${{ secrets.PAT }}
+          TF_VAR_GITHUB_ORG: ${{ vars.ORG }}
+          TF_VAR_DOCS_BUILDER_REPO_NAME: ${{ vars.DOCS_BUILDER_REPO_NAME }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_REPO_NAME: ${{ vars.MANIFESTS_INFRASTRUCTURE_REPO_NAME }}
+          TF_VAR_MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_APPLICATIONS_REPO_NAME: ${{ vars.MANIFESTS_APPLICATIONS_REPO_NAME }}
+          TF_VAR_HUB_NVA_PASSWORD: ${{ secrets.HUB_NVA_PASSWORD }}
+          TF_VAR_HUB_NVA_USERNAME: ${{ secrets.HUB_NVA_USERNAME }}
+          TF_VAR_LW_AGENT_TOKEN: ${{ secrets.LW_AGENT_TOKEN }}
+          TF_VAR_PRODUCTION_ENVIRONMENT: ${{ vars.PRODUCTION_ENVIRONMENT }}
+          TF_VAR_GPU_NODE_POOL: ${{ vars.GPU_NODE_POOL }}
+          TF_VAR_APPLICATION_DOCS: ${{ vars.APPLICATION_DOCS }}
+          TF_VAR_APPLICATION_SIGNUP: ${{ vars.APPLICATION_SIGNUP }}
+          TF_VAR_APPLICATION_OLLAMA: ${{ vars.APPLICATION_OLLAMA }}
+          TF_VAR_APPLICATION_DVWA: ${{ vars.APPLICATION_DVWA }}
+          TF_VAR_APPLICATION_VIDEO: ${{ vars.APPLICATION_VIDEO }}
+          TF_VAR_MANAGEMENT_PUBLIC_IP: ${{ vars.MANAGEMENT_PUBLIC_IP }}
+          TF_VAR_HTUSERNAME: ${{ secrets.HTUSERNAME }}
+          TF_VAR_HTPASSWD: ${{ secrets.HTPASSWD }}
+          TF_VAR_DNS_ZONE: ${{ vars.DNS_ZONE }}
+          TF_VAR_OWNER_EMAIL: ${{ secrets.OWNER_EMAIL }}
+          TF_VAR_NAME: ${{ vars.NAME }}
+          TF_VAR_LETSENCRYPT_URL: ${{ vars.LETSENCRYPT_URL }}
+          TF_IN_AUTOMATION: true
+        run: |
+          export exitcode=0
+          terraform plan -detailed-exitcode -no-color -out tfplan || export exitcode=$?
+          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
+          if [ $exitcode -eq 1 ]; then
+            echo Terraform Plan Failed!
+            exit 1
+          else
+            exit 0
+          fi
+
+      - name: Publish Terraform Plan
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882
+        with:
+          name: tfplan
+          path: ./
+
+      - name: Create String Output
+        id: tf-plan-string
+        run: |
+          TERRAFORM_PLAN=$(terraform show -no-color tfplan)
+          delimiter="$(openssl rand -hex 8)"
+          {
+            echo "summary<<${delimiter}"
+            echo "## Terraform Plan Output"
+            echo "<details><summary>Click to expand</summary>"
+            echo ""
+            echo '```terraform'
+            echo "$TERRAFORM_PLAN"
+            echo '```'
+            echo "</details>"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish Terraform Plan to Task Summary
+        env:
+          SUMMARY: ${{ steps.tf-plan-string.outputs.summary }}
+        run: |
+          echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+      # - name: Push Terraform Output to PR
+      #   if: github.ref != 'refs/heads/main'
+      #   uses: actions/github-script@v6
+      #   env:
+      #     SUMMARY: "${{ steps.tf-plan-string.outputs.summary }}"
+      #   with:
+      #     github-token: ${{ secrets.GITHUB_TOKEN }}
+      #     script: |
+      #       const body = `${process.env.SUMMARY}`;
+      #        github.rest.issues.createComment({
+      #          issue_number: context.issue.number,
+      #          owner: context.repo.owner,
+      #          repo: context.repo.repo,
+      #          body: body
+      #        })
+
+  apply:
+    name: Terraform Apply
+    if: needs.terraform.outputs.action == 'apply'
+    runs-on: ubuntu-latest
+    needs: [terraform, plan]
+    steps:
+      - name: Github repository checkout
+        uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871
+
+      - name: Microsoft Azure Authentication
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Hashicorp Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_wrapper: false
+
+      - name: terraform init
+        id: init
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          TF_IN_AUTOMATION: true
+          TF_CLI_ARGS_init: -backend-config="storage_account_name=${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}" -backend-config="container_name=${{ secrets.TFSTATE_CONTAINER_NAME }}" -backend-config="resource_group_name=${{ secrets.AZURE_TFSTATE_RESOURCE_GROUP_NAME }}" -backend-config="key=${{ github.ref_name }}" -input=false
+        run: terraform init
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: tfplan
+          path: ./
+
+      - name: Terraform Apply
+        id: apply
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          TF_VAR_ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          TF_VAR_PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          TF_VAR_LOCATION: ${{ vars.LOCATION }}
+          TF_VAR_GITHUB_TOKEN: ${{ secrets.PAT }}
+          TF_VAR_GITHUB_ORG: ${{ vars.ORG }}
+          TF_VAR_DOCS_BUILDER_REPO_NAME: ${{ vars.DOCS_BUILDER_REPO_NAME }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_REPO_NAME: ${{ vars.MANIFESTS_INFRASTRUCTURE_REPO_NAME }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_APPLICATIONS_REPO_NAME: ${{ vars.MANIFESTS_APPLICATIONS_REPO_NAME }}
+          TF_VAR_HUB_NVA_PASSWORD: ${{ secrets.HUB_NVA_PASSWORD }}
+          TF_VAR_HUB_NVA_USERNAME: ${{ secrets.HUB_NVA_USERNAME }}
+          TF_VAR_LW_AGENT_TOKEN: ${{ secrets.LW_AGENT_TOKEN }}
+          TF_VAR_PRODUCTION_ENVIRONMENT: ${{ vars.PRODUCTION_ENVIRONMENT }}
+          TF_VAR_GPU_NODE_POOL: ${{ vars.GPU_NODE_POOL }}
+          TF_VAR_APPLICATION_DOCS: ${{ vars.APPLICATION_DOCS }}
+          TF_VAR_APPLICATION_SIGNUP: ${{ vars.APPLICATION_SIGNUP }}
+          TF_VAR_APPLICATION_OLLAMA: ${{ vars.APPLICATION_OLLAMA }}
+          TF_VAR_APPLICATION_DVWA: ${{ vars.APPLICATION_DVWA }}
+          TF_VAR_APPLICATION_VIDEO: ${{ vars.APPLICATION_VIDEO }}
+          TF_VAR_MANAGEMENT_PUBLIC_IP: ${{ vars.MANAGEMENT_PUBLIC_IP }}
+          TF_VAR_HTUSERNAME: ${{ secrets.HTUSERNAME }}
+          TF_VAR_HTPASSWD: ${{ secrets.HTPASSWD }}
+          TF_VAR_DNS_ZONE: ${{ vars.DNS_ZONE }}
+          TF_VAR_OWNER_EMAIL: ${{ secrets.OWNER_EMAIL }}
+          TF_VAR_NAME: ${{ vars.NAME }}
+          TF_VAR_LETSENCRYPT_URL: ${{ vars.LETSENCRYPT_URL }}
+          TF_IN_AUTOMATION: true
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Create Terraform Show Output
+        id: tf-show-output
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+        run: |
+          TERRAFORM_SHOW=$(terraform show -no-color)
+          delimiter="$(openssl rand -hex 8)"
+          {
+            echo "summary<<${delimiter}"
+            echo "## Terraform State Output"
+            echo "<details><summary>Click to expand</summary>"
+            echo ""
+            echo '```terraform'
+            echo "$TERRAFORM_SHOW"
+            echo '```'
+            echo "</details>"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish Terraform Apply Output to Task Summary
+        env:
+          SUMMARY: ${{ steps.tf-show-output.outputs.summary }}
+        run: |
+          echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    name: Terraform Destroy
+    needs: [terraform]
+    if: needs.terraform.outputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Github repository checkout
+        uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871
+
+      - name: Microsoft Azure Authentication
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Hashicorp Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_wrapper: false
+
+      - name: terraform init
+        id: init
+        env:
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          TF_IN_AUTOMATION: true
+          TF_CLI_ARGS_init: -backend-config="storage_account_name=${{ secrets.AZURE_STORAGE_ACCOUNT_NAME }}" -backend-config="container_name=${{ secrets.TFSTATE_CONTAINER_NAME }}" -backend-config="resource_group_name=${{ secrets.AZURE_TFSTATE_RESOURCE_GROUP_NAME }}" -backend-config="key=${{ github.ref_name }}" -input=false
+        run: terraform init
+
+      - name: terraform destroy
+        id: destroy
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          TF_VAR_ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          TF_VAR_PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          TF_VAR_LOCATION: ${{ vars.LOCATION }}
+          TF_VAR_GITHUB_TOKEN: ${{ secrets.PAT }}
+          TF_VAR_GITHUB_ORG: ${{ vars.ORG }}
+          TF_VAR_DOCS_BUILDER_REPO_NAME: ${{ vars.DOCS_BUILDER_REPO_NAME }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_REPO_NAME: ${{ vars.MANIFESTS_INFRASTRUCTURE_REPO_NAME }}
+          TF_VAR_MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY: ${{ secrets.MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY }}
+          TF_VAR_MANIFESTS_APPLICATIONS_REPO_NAME: ${{ vars.MANIFESTS_APPLICATIONS_REPO_NAME }}
+          TF_VAR_HUB_NVA_PASSWORD: ${{ secrets.HUB_NVA_PASSWORD }}
+          TF_VAR_HUB_NVA_USERNAME: ${{ secrets.HUB_NVA_USERNAME }}
+          TF_VAR_LW_AGENT_TOKEN: ${{ secrets.LW_AGENT_TOKEN }}
+          TF_VAR_PRODUCTION_ENVIRONMENT: ${{ vars.PRODUCTION_ENVIRONMENT }}
+          TF_VAR_GPU_NODE_POOL: ${{ vars.GPU_NODE_POOL }}
+          TF_VAR_APPLICATION_DOCS: ${{ vars.APPLICATION_DOCS }}
+          TF_VAR_APPLICATION_SIGNUP: ${{ vars.APPLICATION_SIGNUP }}
+          TF_VAR_APPLICATION_OLLAMA: ${{ vars.APPLICATION_OLLAMA }}
+          TF_VAR_APPLICATION_DVWA: ${{ vars.APPLICATION_DVWA }}
+          TF_VAR_APPLICATION_VIDEO: ${{ vars.APPLICATION_VIDEO }}
+          TF_VAR_MANAGEMENT_PUBLIC_IP: ${{ vars.MANAGEMENT_PUBLIC_IP }}
+          TF_VAR_HTUSERNAME: ${{ secrets.HTUSERNAME }}
+          TF_VAR_HTPASSWD: ${{ secrets.HTPASSWD }}
+          TF_VAR_DNS_ZONE: ${{ vars.DNS_ZONE }}
+          TF_VAR_OWNER_EMAIL: ${{ secrets.OWNER_EMAIL }}
+          TF_VAR_NAME: ${{ vars.NAME }}
+          TF_VAR_LETSENCRYPT_URL: ${{ vars.LETSENCRYPT_URL }}
+          TF_IN_AUTOMATION: true
+        run: |
+          terraform destroy -auto-approve
