@@ -1,5 +1,6 @@
 locals {
-  infrastructure_repo_fqdn = "git@github.com:${var.GITHUB_ORG}/${var.MANIFESTS_INFRASTRUCTURE_REPO_NAME}.git"
+  #infrastructure_repo_fqdn = "git@github.com:${var.GITHUB_ORG}/${var.MANIFESTS_INFRASTRUCTURE_REPO_NAME}.git"
+  infrastructure_repo_fqdn = "https://github.com/${var.GITHUB_ORG}/${var.MANIFESTS_INFRASTRUCTURE_REPO_NAME}.git"
 }
 
 resource "azurerm_kubernetes_flux_configuration" "infrastructure" {
