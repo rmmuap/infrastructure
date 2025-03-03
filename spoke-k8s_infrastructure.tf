@@ -13,7 +13,7 @@ resource "azurerm_kubernetes_flux_configuration" "infrastructure" {
     reference_type           = "branch"
     reference_value          = "main"
     sync_interval_in_seconds = 60
-    ssh_private_key_base64   = base64encode(var.MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY)
+    #ssh_private_key_base64   = base64encode(var.MANIFESTS_INFRASTRUCTURE_SSH_PRIVATE_KEY)
   }
   kustomizations {
     name                       = "infrastructure"
