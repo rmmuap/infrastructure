@@ -73,7 +73,7 @@ resource "kubernetes_secret" "docs_fortiweb_login_secret" {
 }
 
 locals {
-  docs_manifest_repo_fqdn = "git@github.com:${var.GITHUB_ORG}/${var.MANIFESTS_APPLICATIONS_REPO_NAME}.git"
+  docs_manifest_repo_fqdn = "https://github.com/${var.GITHUB_ORG}/${var.MANIFESTS_APPLICATIONS_REPO_NAME}.git"
 }
 
 resource "azurerm_kubernetes_flux_configuration" "docs" {
@@ -88,7 +88,6 @@ resource "azurerm_kubernetes_flux_configuration" "docs" {
     reference_type           = "branch"
     reference_value          = "docs-version"
     sync_interval_in_seconds = 60
-    ssh_private_key_base64   = base64encode(var.MANIFESTS_APPLICATIONS_SSH_PRIVATE_KEY)
   }
   kustomizations {
     name                       = "docs-dependencies"
