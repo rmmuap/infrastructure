@@ -11,7 +11,7 @@ resource "azurerm_public_ip" "hub-nva-vip_dvwa_public_ip" {
   resource_group_name = azurerm_resource_group.azure_resource_group.name
   allocation_method   = "Static"
   sku                 = "Standard"
-  domain_name_label   = "${azurerm_resource_group.azure_resource_group.name}-dvwa"
+  domain_name_label   = "dvwa-${azurerm_resource_group.azure_resource_group.name}"
 }
 
 resource "kubernetes_namespace" "dvwa" {

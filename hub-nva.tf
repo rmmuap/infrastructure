@@ -5,7 +5,7 @@ resource "azurerm_public_ip" "hub-nva-management_public_ip" {
   resource_group_name = azurerm_resource_group.azure_resource_group.name
   allocation_method   = "Static"
   sku                 = "Standard"
-  domain_name_label   = "${azurerm_resource_group.azure_resource_group.name}-management"
+  domain_name_label   = "management-${azurerm_resource_group.azure_resource_group.name}"
 }
 
 resource "azurerm_dns_cname_record" "hub-nva" {
